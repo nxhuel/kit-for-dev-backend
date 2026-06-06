@@ -1,4 +1,4 @@
-# Backend Infrastructure Kit
+# Backend Infrastructure Kit 
 
 Plataforma de servicios compartidos para desarrollo local y despliegue en VPS.
 
@@ -564,4 +564,3 @@ open http://127.0.0.1:8080
 ## Licencia
 
 MIT
-# kit-for-dev-backend
