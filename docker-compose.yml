@@ -1,156 +1,315 @@
 volumes:
-  n8n_storage:
-  postgres_storage:
-  ollama_storage:
-  qdrant_storage:
+  postgres_data:
+  mysql_data:
+  mongodb_data:
+  redis_data:
+  qdrant_data:
+  ollama_data:
+  n8n_data:
+  minio_data:
+  openwebui_data:
+  uptime_kuma_data:
 
 networks:
-  demo:
+  shared-services:
+    name: shared-services
+    driver: bridge
 
-x-n8n: &service-n8n
-  image: n8nio/n8n:latest
-  networks: ['demo']
-  environment:
-    - DB_TYPE=postgresdb
-    - DB_POSTGRESDB_HOST=postgres
-    - DB_POSTGRESDB_USER=${POSTGRES_USER}
-    - DB_POSTGRESDB_PASSWORD=${POSTGRES_PASSWORD}
-    - N8N_DIAGNOSTICS_ENABLED=false
-    - N8N_PERSONALIZATION_ENABLED=false
-    - N8N_ENCRYPTION_KEY
-    - N8N_USER_MANAGEMENT_JWT_SECRET
-    - OLLAMA_HOST=${OLLAMA_HOST:-ollama:11434}
-  env_file:
-    - path: .env
-      required: true
-
-x-ollama: &service-ollama
-  image: ollama/ollama:latest
-  container_name: ollama
-  networks: ['demo']
-  restart: unless-stopped
-  ports:
-    - 11434:11434
-  volumes:
-    - ollama_storage:/root/.ollama
-
-x-init-ollama: &init-ollama
-  image: ollama/ollama:latest
-  networks: ['demo']
-  container_name: ollama-pull-llama
-  volumes:
-    - ollama_storage:/root/.ollama
-  entrypoint: /bin/sh
-  environment:
-    - OLLAMA_HOST=ollama:11434
-  command:
-    - "-c"
-    - "sleep 3; ollama pull llama3.2"
+x-restart: &restart unless-stopped
 
 services:
+  # ---------------------------------------------------------------------------
+  # Bases de datos
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16-alpine
+    container_name: shared-postgres
     hostname: postgres
-    networks: ['demo']
-    restart: unless-stopped
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     environment:
-      - POSTGRES_USER
-      - POSTGRES_PASSWORD
-      - POSTGRES_DB
+      POSTGRES_USER: ${POSTGRES_USER:-appuser}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-apppassword}
+      POSTGRES_DB: ${POSTGRES_DB:-appdb}
     volumes:
-      - postgres_storage:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
-      interval: 5s
+      test: ["CMD-SHELL", "pg_isready -h localhost -U ${POSTGRES_USER:-appuser} -d ${POSTGRES_DB:-appdb}"]
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 30s
 
-  n8n-import:
-    <<: *service-n8n
-    hostname: n8n-import
-    container_name: n8n-import
-    entrypoint: /bin/sh
-    command:
-    - "-c"
-    - |
-      if [ -z "$(n8n list:workflow --onlyId)" ]; then
-        n8n import:credentials --separate --input=/demo-data/credentials && \
-        n8n import:workflow --separate --input=/demo-data/workflows
-      else
-        echo "Workflows exist, skipping import"
-      fi
-    volumes:
-      - ./n8n/demo-data:/demo-data
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  n8n:
-    <<: *service-n8n
-    hostname: n8n
-    container_name: n8n
-    restart: unless-stopped
+  mysql:
+    image: mysql:8.4
+    container_name: shared-mysql
+    hostname: mysql
+    networks: [shared-services]
+    restart: *restart
     ports:
-      - 5678:5678
+      - "${MYSQL_PORT:-3307}:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpassword}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-appdb}
+      MYSQL_USER: ${MYSQL_USER:-appuser}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-apppassword}
     volumes:
-      - n8n_storage:/home/node/.n8n
-      - ./n8n/demo-data:/demo-data
-      - ./shared:/data/shared
-    depends_on:
-      postgres:
-        condition: service_healthy
-      n8n-import:
-        condition: service_completed_successfully
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
 
+  mongodb:
+    image: mongo:7
+    container_name: shared-mongodb
+    hostname: mongodb
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${MONGODB_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USER:-root}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-rootpassword}
+      MONGO_INITDB_DATABASE: ${MONGO_DB:-appdb}
+    volumes:
+      - mongodb_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')", "--quiet"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # Cache
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: shared-redis
+    hostname: redis
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-redispassword}"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-redispassword}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Vector database
+  # ---------------------------------------------------------------------------
   qdrant:
-    image: qdrant/qdrant
+    image: qdrant/qdrant:latest
+    container_name: shared-qdrant
     hostname: qdrant
-    container_name: qdrant
-    networks: ['demo']
-    restart: unless-stopped
+    networks: [shared-services]
+    restart: *restart
     ports:
-      - 6333:6333
+      - "${QDRANT_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
     volumes:
-      - qdrant_storage:/qdrant/storage
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__GRPC_PORT: ${QDRANT_GRPC_PORT:-6334}
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.qdrant.rule=Host(`qdrant.localhost`)"
+      - "traefik.http.routers.qdrant.entrypoints=web"
+      - "traefik.http.services.qdrant.loadbalancer.server.port=6333"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:6333/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
-  ollama-cpu:
-    profiles: ["cpu"]
-    <<: *service-ollama
+  # ---------------------------------------------------------------------------
+  # LLM local
+  # ---------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: shared-ollama
+    hostname: ollama
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
 
-  ollama-gpu:
-    profiles: ["gpu-nvidia"]
-    <<: *service-ollama
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-
-  ollama-gpu-amd:
-    profiles: ["gpu-amd"]
-    <<: *service-ollama
-    image: ollama/ollama:rocm
-    devices:
-      - "/dev/kfd"
-      - "/dev/dri"
-
-  ollama-pull-llama-cpu:
-    profiles: ["cpu"]
-    <<: *init-ollama
+  # ---------------------------------------------------------------------------
+  # Automatización low-code
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: shared-n8n
+    hostname: n8n
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-appuser}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-apppassword}
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-appdb}
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-changeme-key}
+      N8N_USER_MANAGEMENT_JWT_SECRET: ${N8N_JWT_SECRET:-changeme-jwt}
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      OLLAMA_HOST: ollama:11434
+      N8N_HOST: ${N8N_HOST:-n8n.localhost}
+    volumes:
+      - n8n_data:/home/node/.n8n
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.n8n.rule=Host(`n8n.localhost`)"
+      - "traefik.http.routers.n8n.entrypoints=web"
+      - "traefik.http.services.n8n.loadbalancer.server.port=5678"
     depends_on:
-      - ollama-cpu
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5678/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
 
-  ollama-pull-llama-gpu:
-    profiles: ["gpu-nvidia"]
-    <<: *init-ollama
-    depends_on:
-      - ollama-gpu
+  # ---------------------------------------------------------------------------
+  # Object storage S3
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:latest
+    container_name: shared-minio
+    hostname: minio
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_data:/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.minio-api.rule=Host(`minio.localhost`)"
+      - "traefik.http.routers.minio-api.entrypoints=web"
+      - "traefik.http.services.minio-api.loadbalancer.server.port=9000"
+      - "traefik.http.routers.minio-console.rule=Host(`minio-console.localhost`)"
+      - "traefik.http.routers.minio-console.entrypoints=web"
+      - "traefik.http.services.minio-console.loadbalancer.server.port=9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
 
-  ollama-pull-llama-gpu-amd:
-    profiles: [gpu-amd]
-    <<: *init-ollama
-    image: ollama/ollama:rocm
+  # ---------------------------------------------------------------------------
+  # Interfaz LLM
+  # ---------------------------------------------------------------------------
+  openwebui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: shared-openwebui
+    hostname: openwebui
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${OPENWEBUI_PORT:-3000}:8080"
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434
+      WEBUI_SECRET_KEY: ${WEBUI_SECRET_KEY:-changeme-webui-secret}
+    volumes:
+      - openwebui_data:/app/backend/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.openwebui.rule=Host(`openwebui.localhost`)"
+      - "traefik.http.routers.openwebui.entrypoints=web"
+      - "traefik.http.services.openwebui.loadbalancer.server.port=8080"
     depends_on:
-     - ollama-gpu-amd
+      ollama:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # Reverse proxy
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.1
+    container_name: shared-traefik
+    hostname: traefik
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${TRAEFIK_HTTP_PORT:-80}:80"
+      - "${TRAEFIK_HTTPS_PORT:-443}:443"
+      - "127.0.0.1:8080:8080"
+    command:
+      - "--api.dashboard=true"
+      - "--log.level=INFO"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=shared-services"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # ---------------------------------------------------------------------------
+  # Monitoreo de disponibilidad
+  # ---------------------------------------------------------------------------
+  uptime-kuma:
+    image: louislam/uptime-kuma:latest
+    container_name: shared-uptime-kuma
+    hostname: uptime-kuma
+    networks: [shared-services]
+    restart: *restart
+    ports:
+      - "${UPTIME_KUMA_PORT:-3001}:3001"
+    volumes:
+      - uptime_kuma_data:/app/data
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.uptime.rule=Host(`uptime.localhost`)"
+      - "traefik.http.routers.uptime.entrypoints=web"
+      - "traefik.http.services.uptime.loadbalancer.server.port=3001"
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3001', r => { process.exit(r.statusCode === 200 ? 0 : 1) })"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
